@@ -62,13 +62,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Astro CLI
-        run: curl -sSL install.astronomer.io | sudo bash -s
-
-      - name: astro deploy (orchestration plane)
+      - name: Deploy to Astro
+        uses: astronomer/deploy-action@v0.16.0
+        with:
+          deployment-id: cmucn0ycj8rok01o01utsobqi
         env:
           ASTRO_API_TOKEN: ${{ secrets.ASTRO_API_TOKEN }}
-        run: astro deploy --deployment-id cmucn0ycj8rok01o01utsobqi -f
 
   deploy-agent:
     needs: build-push-client

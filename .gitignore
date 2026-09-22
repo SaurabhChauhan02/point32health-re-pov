@@ -1,0 +1,6 @@
+.astro/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+astro-remote-execution-agent-*.tgz

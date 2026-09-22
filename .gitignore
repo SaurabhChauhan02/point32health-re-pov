@@ -4,3 +4,4 @@ __pycache__/
 .DS_Store
 .env
 astro-remote-execution-agent-*.tgz
+.idea/

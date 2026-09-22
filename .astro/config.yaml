@@ -1,0 +1,4 @@
+project:
+    name: point32health-re-pov
+remote:
+    client_registry: astroremoteexecacr.azurecr.io/astro-agent

@@ -23,10 +23,12 @@ from airflow.providers.sftp.sensors.sftp import SFTPSensor
 SFTP_CONN_ID = "sftp_claims"
 ORACLE_CONN_ID = "oracle_staging"
 
+# The SFTP session is rooted at the blob container named in the login
+# (point32demo.inbound.claimsuser), so these paths are container-relative.
 DEFAULT_PARAMS = {
-    "remote_dir": "/inbound",
+    "remote_dir": "/",
     "filename": "claims_data.csv",
-    "archive_dir": "/inbound/archive",
+    "archive_dir": "/archive",
     "staging_schema": "STAGING",
     "staging_table": "CLAIMS_RAW",
 }

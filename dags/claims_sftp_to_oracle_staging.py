@@ -106,9 +106,14 @@ def claims_sftp_to_oracle_staging():
         print(f"Loaded {len(rows)} rows into {STAGING_TABLE}")
         return len(rows)
 
-    @task
-    def archive_claims(**context) -> str:
+    @task(trigger_rule="all_done")
+    def archive_claims(**context) -> str | None:
+        """Archive the input even when an earlier task fails."""
         hook = SFTPHook(ssh_conn_id=SFTP_CONN_ID)
+        if not hook.path_exists(CLAIMS_FILE):
+            print(f"Nothing to archive: {CLAIMS_FILE} was not found")
+            return None
+
         if not hook.path_exists(ARCHIVE_DIR):
             hook.create_directory(ARCHIVE_DIR)
 

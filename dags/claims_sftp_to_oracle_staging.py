@@ -1,21 +1,21 @@
-"""Demo pipeline: pull a claims CSV from SFTP, profile it, index it, land it in an
-Oracle STAGING schema, then zip and archive the source file back on the SFTP server.
+"""Claims demo pipeline.
 
-Runs on Astro remote execution, where every task executes in its own pod. There is no
-shared local filesystem between tasks, so each task that needs the file streams it
-from SFTP rather than relying on a file left behind by an upstream task.
+Picks up a claims CSV from SFTP, profiles it, scores it, loads it into the
+Oracle STAGING schema, then zips the source file into an archive folder.
+
+STAGING.CLAIMS_RAW is created and owned by the DBA, not by this DAG. The DAG
+only truncates and reloads it.
 """
 
 from __future__ import annotations
 
-import hashlib
 import io
 import posixpath
-import re
 import zipfile
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from airflow.sdk import dag, task
+from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
 from airflow.providers.oracle.hooks.oracle import OracleHook
 from airflow.providers.sftp.hooks.sftp import SFTPHook
 from airflow.providers.sftp.sensors.sftp import SFTPSensor
@@ -23,27 +23,25 @@ from airflow.providers.sftp.sensors.sftp import SFTPSensor
 SFTP_CONN_ID = "sftp_claims"
 ORACLE_CONN_ID = "oracle_staging"
 
-# The SFTP session is rooted at the blob container named in the login
-# (point32demo.inbound.claimsuser), so these paths are container-relative.
-DEFAULT_PARAMS = {
-    "remote_dir": "/",
-    "filename": "claims_data.csv",
-    "archive_dir": "/archive",
-    "staging_schema": "STAGING",
-    "staging_table": "CLAIMS_RAW",
-}
+# The SFTP login names the blob container, so the session already starts
+# inside `inbound` and these paths are relative to it.
+CLAIMS_FILE = "claims_data.csv"
+ARCHIVE_DIR = "archive"
+
+STAGING_TABLE = "STAGING.CLAIMS_RAW"
 
 
-def _remote_path(params: dict) -> str:
-    return posixpath.join(params["remote_dir"], params["filename"])
+def read_claims_csv():
+    """Stream the CSV off SFTP into a DataFrame.
 
+    Under remote execution each task gets its own pod, so there is no shared
+    /tmp to hand a downloaded file between tasks - every task re-reads it.
+    """
+    # Imported here rather than at module level to keep DAG parsing fast.
+    import pandas as pd
 
-def _oracle_identifier(name: str) -> str:
-    """Turn a CSV header into a safe, unquoted Oracle identifier."""
-    ident = re.sub(r"\W+", "_", name.strip().upper()).strip("_")
-    if not ident or ident[0].isdigit():
-        ident = f"C_{ident}"
-    return ident[:30]
+    with SFTPHook(ssh_conn_id=SFTP_CONN_ID).get_conn().open(CLAIMS_FILE, "rb") as f:
+        return pd.read_csv(f, dtype=str)
 
 
 @dag(
@@ -51,171 +49,88 @@ def _oracle_identifier(name: str) -> str:
     start_date=datetime(2026, 1, 1),
     schedule=None,
     catchup=False,
-    max_active_runs=1,
-    default_args={
-        "owner": "data-platform",
-        "retries": 2,
-        "retry_delay": timedelta(minutes=1),
-    },
-    params=DEFAULT_PARAMS,
-    tags=["demo", "claims", "sftp", "oracle"],
+    tags=["demo", "claims"],
     doc_md=__doc__,
 )
 def claims_sftp_to_oracle_staging():
     wait_for_file = SFTPSensor(
-        task_id="wait_for_claims_file",
+        task_id="wait_for_file",
         sftp_conn_id=SFTP_CONN_ID,
-        path="{{ params.remote_dir }}/{{ params.filename }}",
-        poke_interval=30,
-        timeout=60 * 30,
+        path=CLAIMS_FILE,
         deferrable=True,
     )
 
     @task
-    def profile_claims_file(params: dict) -> dict:
-        """Read the CSV off SFTP and log shape, size, and column-level metrics."""
-        import pandas as pd
-
-        path = _remote_path(params)
-        hook = SFTPHook(ssh_conn_id=SFTP_CONN_ID)
-        client = hook.get_conn()
-
-        stat = client.stat(path)
-        with client.open(path, "rb") as fh:
-            fh.prefetch()
-            raw = fh.read()
-
-        frame = pd.read_csv(io.BytesIO(raw))
-        null_counts = {c: int(frame[c].isna().sum()) for c in frame.columns}
+    def profile_claims() -> dict:
+        size_kb = SFTPHook(ssh_conn_id=SFTP_CONN_ID).get_conn().stat(CLAIMS_FILE).st_size / 1024
+        df = read_claims_csv()
 
         metrics = {
-            "remote_path": path,
-            "file_type": posixpath.splitext(params["filename"])[1].lstrip(".").lower() or "unknown",
-            "size_bytes": int(stat.st_size),
-            "size_mb": round(int(stat.st_size) / (1024 * 1024), 4),
-            "modified_at": datetime.utcfromtimestamp(stat.st_mtime).isoformat(),
-            "sha256": hashlib.sha256(raw).hexdigest(),
-            "total_rows": int(len(frame)),
-            "total_columns": int(len(frame.columns)),
-            "columns": list(frame.columns),
-            "dtypes": {c: str(t) for c, t in frame.dtypes.items()},
-            "null_counts": null_counts,
-            "total_nulls": int(sum(null_counts.values())),
+            "rows": len(df),
+            "columns": len(df.columns),
+            "nulls": int(df.isna().sum().sum()),
+            "size_kb": round(size_kb, 1),
         }
-
-        print("===== claims_data profile =====")
-        print(f"  remote path    : {metrics['remote_path']}")
-        print(f"  file type      : {metrics['file_type']}")
-        print(f"  size           : {metrics['size_bytes']:,} bytes ({metrics['size_mb']} MB)")
-        print(f"  last modified  : {metrics['modified_at']}")
-        print(f"  sha256         : {metrics['sha256']}")
-        print(f"  rows           : {metrics['total_rows']:,}")
-        print(f"  columns        : {metrics['total_columns']}")
-        for col in frame.columns:
-            print(f"    - {col:<30} dtype={metrics['dtypes'][col]:<10} nulls={null_counts[col]}")
-        print(f"  total nulls    : {metrics['total_nulls']:,}")
-        print("===============================")
-
+        print(f"{CLAIMS_FILE}: {metrics['rows']} rows, {metrics['columns']} columns, "
+              f"{metrics['nulls']} nulls, {metrics['size_kb']} KB")
         return metrics
 
     @task
-    def compute_claims_index(metrics: dict) -> float:
-        """Mocked index function. Stands in for a real scoring/indexing service."""
-        cells = max(metrics["total_rows"] * metrics["total_columns"], 1)
-        completeness = 1 - (metrics["total_nulls"] / cells)
-        index_value = round(completeness * 100, 2)
+    def score_claims(metrics: dict) -> float:
+        """Stands in for the real claims scoring service."""
+        index = round(100 * (1 - metrics["nulls"] / (metrics["rows"] * metrics["columns"])), 2)
+        print(f"Claims completeness index: {index}")
+        return index
 
-        print(f"[mock index] evaluated {cells:,} cells")
-        print(f"[mock index] claims completeness index = {index_value}")
-        return index_value
+    # Truncate rather than delete-by-run-id: this is a full reload each time.
+    clear_staging = SQLExecuteQueryOperator(
+        task_id="clear_staging",
+        conn_id=ORACLE_CONN_ID,
+        sql=f"TRUNCATE TABLE {STAGING_TABLE}",
+    )
 
     @task
-    def load_to_staging(metrics: dict, params: dict, **context) -> int:
-        """Land the raw CSV in Oracle as VARCHAR2 columns, keyed by this DAG run."""
-        import pandas as pd
+    def load_claims(**context) -> int:
+        df = read_claims_csv()
+        df["LOAD_RUN_ID"] = context["dag_run"].run_id
 
-        path = _remote_path(params)
-        sftp = SFTPHook(ssh_conn_id=SFTP_CONN_ID)
-        with sftp.get_conn().open(path, "rb") as fh:
-            fh.prefetch()
-            frame = pd.read_csv(fh, dtype=str, keep_default_na=False)
+        # Oracle wants None for empty cells, not the NaN that pandas produces.
+        rows = df.astype(object).where(df.notna(), None).values.tolist()
 
-        columns = [_oracle_identifier(c) for c in frame.columns]
-        table = f"{params['staging_schema']}.{params['staging_table']}"
-        run_id = context["dag_run"].run_id
-
-        oracle = OracleHook(oracle_conn_id=ORACLE_CONN_ID)
-        column_ddl = ",\n            ".join(f"{c} VARCHAR2(4000)" for c in columns)
-        oracle.run(
-            f"""
-            DECLARE
-              v_exists NUMBER;
-            BEGIN
-              SELECT COUNT(*) INTO v_exists FROM all_tables
-               WHERE owner = '{params["staging_schema"]}'
-                 AND table_name = '{params["staging_table"]}';
-              IF v_exists = 0 THEN
-                EXECUTE IMMEDIATE 'CREATE TABLE {table} (
-            {column_ddl},
-            LOAD_RUN_ID VARCHAR2(250),
-            LOADED_AT TIMESTAMP,
-            SOURCE_SHA256 VARCHAR2(64)
-                )';
-              END IF;
-            END;
-            """
+        OracleHook(oracle_conn_id=ORACLE_CONN_ID).insert_rows(
+            table=STAGING_TABLE,
+            rows=rows,
+            target_fields=list(df.columns),
+            commit_every=500,
         )
-
-        # Idempotent: this run owns its own slice of the staging table.
-        oracle.run(f"DELETE FROM {table} WHERE LOAD_RUN_ID = :run_id", parameters={"run_id": run_id})
-
-        loaded_at = datetime.utcnow()
-        rows = [
-            list(record) + [run_id, loaded_at, metrics["sha256"]]
-            for record in frame.itertuples(index=False, name=None)
-        ]
-        target_fields = columns + ["LOAD_RUN_ID", "LOADED_AT", "SOURCE_SHA256"]
-
-        oracle.insert_rows(table=table, rows=rows, target_fields=target_fields, commit_every=1000)
-
-        print(f"Loaded {len(rows):,} rows into {table} for run_id={run_id}")
+        print(f"Loaded {len(rows)} rows into {STAGING_TABLE}")
         return len(rows)
 
     @task
-    def archive_on_sftp(params: dict, **context) -> str:
-        """Zip the source file in place and move the archive into archive/."""
-        source = _remote_path(params)
-        archive_dir = params["archive_dir"]
-        stem = posixpath.splitext(params["filename"])[0]
-        stamp = context["dag_run"].run_after.strftime("%Y%m%dT%H%M%S")
-        archive_path = posixpath.join(archive_dir, f"{stem}_{stamp}.zip")
-
+    def archive_claims(**context) -> str:
         hook = SFTPHook(ssh_conn_id=SFTP_CONN_ID)
-        if not hook.path_exists(archive_dir):
-            hook.create_directory(archive_dir)
+        if not hook.path_exists(ARCHIVE_DIR):
+            hook.create_directory(ARCHIVE_DIR)
 
-        client = hook.get_conn()
-        with client.open(source, "rb") as fh:
-            fh.prefetch()
-            payload = fh.read()
+        sftp = hook.get_conn()
+        stamp = context["dag_run"].run_after.strftime("%Y%m%dT%H%M%S")
+        target = posixpath.join(ARCHIVE_DIR, f"claims_data_{stamp}.zip")
 
+        # Zip in memory so nothing has to touch the worker's local disk.
         buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr(params["filename"], payload)
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            with sftp.open(CLAIMS_FILE, "rb") as f:
+                archive.writestr(CLAIMS_FILE, f.read())
         buffer.seek(0)
 
-        client.putfo(buffer, archive_path, confirm=True)
-        client.remove(source)
+        sftp.putfo(buffer, target, confirm=True)
+        sftp.remove(CLAIMS_FILE)
+        print(f"Archived {CLAIMS_FILE} to {target}")
+        return target
 
-        print(f"Archived {source} -> {archive_path} ({buffer.getbuffer().nbytes:,} zipped bytes)")
-        return archive_path
+    metrics = profile_claims()
 
-    metrics = profile_claims_file()
-    index_value = compute_claims_index(metrics)
-    loaded = load_to_staging(metrics)
-    archived = archive_on_sftp()
-
-    wait_for_file >> metrics >> index_value >> loaded >> archived
+    wait_for_file >> metrics >> score_claims(metrics) >> clear_staging >> load_claims() >> archive_claims()
 
 
 claims_sftp_to_oracle_staging()

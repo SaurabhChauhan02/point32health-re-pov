@@ -59,7 +59,7 @@ jobs:
         run: |
           docker run --rm --entrypoint sh \
             ${{ vars.ACR_NAME }}.azurecr.io/astro-agent:${{ steps.get-tag.outputs.tag }} \
-            -c "pip list | grep -iE 'microsoft|common-io|adlfs'"
+            -c "pip list | grep -iE 'microsoft|common-io|adlfs|sftp|oracle|pandas'"
 
   deploy-server:
     runs-on: ubuntu-latest

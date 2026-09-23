@@ -2,3 +2,6 @@
 apache-airflow-providers-microsoft-azure
 apache-airflow-providers-common-io
 adlfs
+apache-airflow-providers-sftp
+apache-airflow-providers-oracle
+pandas

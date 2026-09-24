@@ -16,6 +16,7 @@ from airflow.sdk import dag, task
 from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
 from airflow.providers.oracle.hooks.oracle import OracleHook
 from airflow.providers.sftp.hooks.sftp import SFTPHook
+from airflow.providers.sftp.sensors.sftp import SFTPSensor
 
 SFTP_CONN_ID = "sftp_claims"
 ORACLE_CONN_ID = "oracle_staging"
@@ -37,6 +38,16 @@ STAGING_TABLE = "STAGING.CLAIMS_RAW"
     doc_md=__doc__,
 )
 def claims_sftp_to_oracle_staging():
+    # Deferral releases the worker slot while the triggerer polls for the inbound file.
+    wait_for_file = SFTPSensor(
+        task_id="wait_for_file",
+        sftp_conn_id=SFTP_CONN_ID,
+        path=CLAIMS_FILE,
+        poke_interval=30,
+        timeout=1800,
+        deferrable=True,
+    )
+
     @task
     def extract_claims() -> dict:
         """Read SFTP once and return a JSON-serializable claims payload.
@@ -128,6 +139,7 @@ def claims_sftp_to_oracle_staging():
         return target
 
     claims = extract_claims()
+    wait_for_file >> claims
     metrics = profile_claims(claims)
     loaded = load_claims(claims)
 

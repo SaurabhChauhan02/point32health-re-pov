@@ -1,7 +1,7 @@
 """Claims demo pipeline.
 
 Picks up a claims CSV from SFTP, profiles it, scores it, loads it into the
-Oracle STAGING schema, then zips the source file into an archive folder.
+Oracle STAGING schema, then moves the source file into an archive folder.
 
 STAGING.CLAIMS_RAW is created and owned by the DBA, not by this DAG. The DAG
 only truncates and reloads it.
@@ -9,16 +9,13 @@ only truncates and reloads it.
 
 from __future__ import annotations
 
-import io
 import posixpath
-import zipfile
 from datetime import datetime
 
 from airflow.sdk import dag, task
 from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
 from airflow.providers.oracle.hooks.oracle import OracleHook
 from airflow.providers.sftp.hooks.sftp import SFTPHook
-from airflow.providers.sftp.sensors.sftp import SFTPSensor
 
 SFTP_CONN_ID = "sftp_claims"
 ORACLE_CONN_ID = "oracle_staging"
@@ -31,19 +28,6 @@ ARCHIVE_DIR = "archive"
 STAGING_TABLE = "STAGING.CLAIMS_RAW"
 
 
-def read_claims_csv():
-    """Stream the CSV off SFTP into a DataFrame.
-
-    Under remote execution each task gets its own pod, so there is no shared
-    /tmp to hand a downloaded file between tasks - every task re-reads it.
-    """
-    # Imported here rather than at module level to keep DAG parsing fast.
-    import pandas as pd
-
-    with SFTPHook(ssh_conn_id=SFTP_CONN_ID).get_conn().open(CLAIMS_FILE, "rb") as f:
-        return pd.read_csv(f, dtype=str)
-
-
 @dag(
     dag_id="claims_sftp_to_oracle_staging",
     start_date=datetime(2026, 1, 1),
@@ -53,23 +37,38 @@ def read_claims_csv():
     doc_md=__doc__,
 )
 def claims_sftp_to_oracle_staging():
-    wait_for_file = SFTPSensor(
-        task_id="wait_for_file",
-        sftp_conn_id=SFTP_CONN_ID,
-        path=CLAIMS_FILE,
-        deferrable=True,
-    )
+    @task
+    def extract_claims() -> dict:
+        """Read SFTP once and return a JSON-serializable claims payload.
+
+        Remote Execution tasks can run in different pods, so their local filesystems
+        are not shared. Passing plain Python data through XCom lets Airflow move the
+        payload between tasks; this deployment offloads XComs to Azure object storage.
+        """
+        # Keep pandas out of DAG parsing and convert its values to JSON-safe Python types.
+        import pandas as pd
+
+        with SFTPHook(ssh_conn_id=SFTP_CONN_ID).get_conn() as sftp:
+            size_kb = sftp.stat(CLAIMS_FILE).st_size / 1024
+            with sftp.open(CLAIMS_FILE, "rb") as source:
+                df = pd.read_csv(source, dtype=str)
+
+        normalized = df.astype(object).where(df.notna(), None)
+        return {
+            "columns": list(normalized.columns),
+            "rows": normalized.values.tolist(),
+            "size_kb": round(size_kb, 1),
+        }
 
     @task
-    def profile_claims() -> dict:
-        size_kb = SFTPHook(ssh_conn_id=SFTP_CONN_ID).get_conn().stat(CLAIMS_FILE).st_size / 1024
-        df = read_claims_csv()
-
+    def profile_claims(claims: dict) -> dict:
+        rows = claims["rows"]
+        columns = claims["columns"]
         metrics = {
-            "rows": len(df),
-            "columns": len(df.columns),
-            "nulls": int(df.isna().sum().sum()),
-            "size_kb": round(size_kb, 1),
+            "rows": len(rows),
+            "columns": len(columns),
+            "nulls": sum(value is None for row in rows for value in row),
+            "size_kb": claims["size_kb"],
         }
         print(f"{CLAIMS_FILE}: {metrics['rows']} rows, {metrics['columns']} columns, "
               f"{metrics['nulls']} nulls, {metrics['size_kb']} KB")
@@ -90,17 +89,17 @@ def claims_sftp_to_oracle_staging():
     )
 
     @task
-    def load_claims(**context) -> int:
-        df = read_claims_csv()
-        df["LOAD_RUN_ID"] = context["dag_run"].run_id
-
-        # Oracle wants None for empty cells, not the NaN that pandas produces.
-        rows = df.astype(object).where(df.notna(), None).values.tolist()
+    def load_claims(claims: dict, **context) -> int:
+        columns = [*claims["columns"], "LOAD_RUN_ID"]
+        rows = [
+            [*row, context["dag_run"].run_id]
+            for row in claims["rows"]
+        ]
 
         OracleHook(oracle_conn_id=ORACLE_CONN_ID).insert_rows(
             table=STAGING_TABLE,
             rows=rows,
-            target_fields=list(df.columns),
+            target_fields=columns,
             commit_every=500,
         )
         print(f"Loaded {len(rows)} rows into {STAGING_TABLE}")
@@ -109,33 +108,30 @@ def claims_sftp_to_oracle_staging():
     @task(trigger_rule="all_done")
     def archive_claims(**context) -> str | None:
         """Archive the input even when an earlier task fails."""
-        hook = SFTPHook(ssh_conn_id=SFTP_CONN_ID)
-        if not hook.path_exists(CLAIMS_FILE):
-            print(f"Nothing to archive: {CLAIMS_FILE} was not found")
-            return None
+        with SFTPHook(ssh_conn_id=SFTP_CONN_ID).get_conn() as sftp:
+            try:
+                sftp.stat(CLAIMS_FILE)
+            except FileNotFoundError:
+                print(f"Nothing to archive: {CLAIMS_FILE} was not found")
+                return None
 
-        if not hook.path_exists(ARCHIVE_DIR):
-            hook.create_directory(ARCHIVE_DIR)
+            try:
+                sftp.stat(ARCHIVE_DIR)
+            except FileNotFoundError:
+                sftp.mkdir(ARCHIVE_DIR)
 
-        sftp = hook.get_conn()
-        stamp = context["dag_run"].run_after.strftime("%Y%m%dT%H%M%S")
-        target = posixpath.join(ARCHIVE_DIR, f"claims_data_{stamp}.zip")
-
-        # Zip in memory so nothing has to touch the worker's local disk.
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-            with sftp.open(CLAIMS_FILE, "rb") as f:
-                archive.writestr(CLAIMS_FILE, f.read())
-        buffer.seek(0)
-
-        sftp.putfo(buffer, target, confirm=True)
-        sftp.remove(CLAIMS_FILE)
+            stamp = context["dag_run"].run_after.strftime("%Y%m%dT%H%M%S")
+            target = posixpath.join(ARCHIVE_DIR, f"claims_data_{stamp}.csv")
+            # Rename on the SFTP server instead of downloading and uploading the file again.
+            sftp.rename(CLAIMS_FILE, target)
         print(f"Archived {CLAIMS_FILE} to {target}")
         return target
 
-    metrics = profile_claims()
+    claims = extract_claims()
+    metrics = profile_claims(claims)
+    loaded = load_claims(claims)
 
-    wait_for_file >> metrics >> score_claims(metrics) >> clear_staging >> load_claims() >> archive_claims()
+    score_claims(metrics) >> clear_staging >> loaded >> archive_claims()
 
 
 claims_sftp_to_oracle_staging()

@@ -7,7 +7,7 @@ from airflow.providers.ssh.operators.ssh import SSHOperator
 from airflow.sdk import dag
 
 SSH_CONN_ID = "azure_member_demo_vm"
-DEMO_DIR = "/tmp/airflow-member-demo/{{ ds_nodash }}"
+DEMO_DIR = "/tmp/airflow-member-demo/{{ run_id | replace(':', '-') | replace('+', '-') }}"
 
 
 @dag(

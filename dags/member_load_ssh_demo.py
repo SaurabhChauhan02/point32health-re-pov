@@ -36,49 +36,56 @@ DEMO_DIR = "/tmp/airflow-member-demo/{{ run_id | replace(':', '-') | replace('+'
     doc_md=__doc__,
 )
 def member_load_ssh_demo():
-    # First prove the remote worker can retrieve the SSH connection and run on the Azure VM.
+    # Connect to the Azure VM before starting any work. The hostname and username in
+    # the task log prove that the command ran on the VM rather than on an Airflow worker.
     verify_vm = SSHOperator(
         task_id="verify_azure_vm",
         ssh_conn_id=SSH_CONN_ID,
         command="hostname && whoami && date",
     )
 
-    # Create one workspace per DAG run, representing the legacy process-control initialization.
+    # Create a separate workspace for this run before releasing the load tasks. This
+    # represents the process-control initialization and gives every run its own evidence.
     initialize = SSHOperator(
         task_id="initialize_member_load",
         ssh_conn_id=SSH_CONN_ID,
         command=f"mkdir -p {DEMO_DIR} && echo initialized > {DEMO_DIR}/status.txt",
     )
 
-    # Start a representative member-history job and leave a marker that the customer can inspect.
+    # Represent the member-history load with a remote command. The marker file provides
+    # a simple result that can be inspected directly on the VM after the demo.
     load_member_history = SSHOperator(
         task_id="load_member_history",
         ssh_conn_id=SSH_CONN_ID,
         command=f"echo member_history_complete > {DEMO_DIR}/member_history.txt",
     )
 
-    # Run the cross-reference branch in parallel to demonstrate independent remote jobs.
+    # Represent the member cross-reference load. It starts alongside the other load tasks
+    # to show that Airflow can fan out independent jobs and track each one separately.
     load_member_cross_reference = SSHOperator(
         task_id="load_member_cross_reference",
         ssh_conn_id=SSH_CONN_ID,
         command=f"echo member_cross_reference_complete > {DEMO_DIR}/member_cross_reference.txt",
     )
 
-    # Run a third member-domain branch so Airflow's fan-out is visible in the Graph view.
+    # Represent the member-risk load as a third remote job. A failure here would affect
+    # this task independently while preventing the final completion step from running.
     load_member_risk = SSHOperator(
         task_id="load_member_risk",
         ssh_conn_id=SSH_CONN_ID,
         command=f"echo member_risk_complete > {DEMO_DIR}/member_risk.txt",
     )
 
-    # Join the branches and display the VM files only when every remote job has succeeded.
+    # Wait for all three load branches, mark the run complete, and list the output files.
+    # This proves that downstream work is not released until every required job succeeds.
     complete = SSHOperator(
         task_id="complete_member_load",
         ssh_conn_id=SSH_CONN_ID,
         command=f"echo complete >> {DEMO_DIR}/status.txt && ls -la {DEMO_DIR}",
     )
 
-    # These dependencies prevent the load branches from starting before initialization completes.
+    # The sequence mirrors the scheduler requirement: connectivity first, initialization
+    # second, parallel member loads third, and a single completion point at the end.
     verify_vm >> initialize >> [
         load_member_history,
         load_member_cross_reference,

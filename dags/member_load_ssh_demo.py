@@ -89,7 +89,7 @@ def member_load_ssh_demo():
     verify_vm >> initialize >> [
         load_member_history,
         load_member_cross_reference,
-        load_member_risk,
+        
     ] >> complete
 
 

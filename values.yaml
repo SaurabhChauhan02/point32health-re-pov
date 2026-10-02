@@ -171,7 +171,7 @@ commonEnv:
 openLineage:
   # If set to true, the OpenLineage integration will be enabled on all Agent components.
   # If set to false, sets the `OPENLINEAGE_DISABLED` environment variable on all Agent components.
-  enabled: false
+  enabled: true
 
   # The secret containing the OpenLineage API key to connect the Agent and send observability data to Astro
   # apiKeySecret field should be used when the secret has already been created in the namespace through
@@ -185,7 +185,7 @@ openLineage:
   # The secret will be created with the name openlineage-api-key-secret
   # Provide the token as a string value
   # Note: Both apiKeySecret and apiKey field can not be set at the same time
-  # apiKey:
+  apiKey: eyJhbGciOiJSUzI1NiIsImtpZCI6ImNsb2Q0aGtqejAya3AwMWozdWNqbzJwOHIiLCJ0eXAiOiJKV1QifQ.eyJhcGlUb2tlbklkIjoiY211cmJic2ZrNnFtajAxbWt2NjJhODk1OCIsImF1ZCI6ImFzdHJvbm9tZXItZWUiLCJpYXQiOjE3OTA5NjY2OTIsImlzQXN0cm9ub21lckdlbmVyYXRlZCI6dHJ1ZSwiaXNJbnRlcm5hbCI6ZmFsc2UsImlzcyI6Imh0dHBzOi8vYXBpLmFzdHJvbm9tZXIuaW8iLCJraWQiOiJjbG9kNGhranowMmtwMDFqM3Vjam8ycDhyIiwicGVybWlzc2lvbnMiOlsiYXBpVG9rZW5JZDpjbXVyYmJzZms2cW1qMDFta3Y2MmE4OTU4IiwiZGVwbG95bWVudElkOmNtdWNuMHljajhyb2swMW8wMXV0c29icWkiLCJvcmdhbml6YXRpb25JZDpjbXE4NmZudGIxZTZnMDFvdXg4NTk3amd6Iiwib3JnU2hvcnROYW1lOmNtcTg2Zm50YjFlNmcwMW91eDg1OTdqZ3oiLCJ3b3Jrc3BhY2VJZDpjbXViY3hhY2c2eW5vMDFvb211cGE5cmlwIl0sInNjb3BlIjoiYXBpVG9rZW5JZDpjbXVyYmJzZms2cW1qMDFta3Y2MmE4OTU4IGRlcGxveW1lbnRJZDpjbXVjbjB5Y2o4cm9rMDFvMDF1dHNvYnFpIG9yZ2FuaXphdGlvbklkOmNtcTg2Zm50YjFlNmcwMW91eDg1OTdqZ3ogb3JnU2hvcnROYW1lOmNtcTg2Zm50YjFlNmcwMW91eDg1OTdqZ3oiLCJzdWIiOiJjbXBtc3B4a283cnNxMDFqN2VoZXpibTd4IiwidmVyc2lvbiI6ImNtdXJiYnNmazZxbWkwMW1rMWZtZWk4c3YifQ.qTIjFhh86lhrMH-9iEQ4f3FeaBsxmbzoP6KkynOuL64cueiofr6IzfDAsFD-4YNIDtlzVriSyuPxqlD_quZWE_-wjSASsVFo-jCd09HsoU8eT8tXjd4I7wVN-kEkI5JMxeWgGpADSeTir4lZcZu1vzV-emX6uWulGsHmdVf0ZAMw8M87z56ctd7buWUHJFHLFas4Vb6wg82kORdg2C2P8GCJauDRxvpk3Gv1hKVC5fQ5_qb3ON0OyrBx7hQMVNXz0DEziQvto2C_9NsWkcAKrwqfr5cnaYU4Jf0kcbRUoMD4umGPu1_m91fkMeTJbMuJxddv1WLKyt4w4yEu60L9OQ
   # The Astro Deployment deployment namespace to which the OpenLineage data is sent
   # This is used to identify the Astro Deployment in the OpenLineage data
   # This is set as the `OPENLINEAGE_NAMESPACE` environment variable on all Agent components

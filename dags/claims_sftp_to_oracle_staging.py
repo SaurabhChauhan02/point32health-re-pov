@@ -116,9 +116,9 @@ def claims_sftp_to_oracle_staging():
         print(f"Loaded {len(rows)} rows into {STAGING_TABLE}")
         return len(rows)
 
-    @task(trigger_rule="all_done")
+    @task
     def archive_claims(**context) -> str | None:
-        """Archive the input even when an earlier task fails."""
+        """Archive the input after a successful load."""
         with SFTPHook(ssh_conn_id=SFTP_CONN_ID).get_conn() as sftp:
             try:
                 sftp.stat(CLAIMS_FILE)

@@ -3,8 +3,10 @@ name: Deploy Astro Remote Execution
 on:
   push:
     branches: [main]
+    # NOTE: dags/** is intentionally NOT listed. DAGs are served by GitDagBundle,
+    # so DAG-only changes are picked up by the agent from Git within the
+    # bundle refresh_interval and do not need an image build or agent restart.
     paths:
-      - 'dags/**'
       - 'Dockerfile'
       - 'Dockerfile.client'
       - 'requirements.txt'
@@ -60,6 +62,12 @@ jobs:
           docker run --rm --entrypoint sh \
             ${{ vars.ACR_NAME }}.azurecr.io/astro-agent:${{ steps.get-tag.outputs.tag }} \
             -c "pip list | grep -iE 'microsoft|common-io|adlfs|sftp|ssh|oracle|pandas'"
+
+      - name: Verify git provider is present (required for GitDagBundle)
+        run: |
+          docker run --rm --entrypoint sh \
+            ${{ vars.ACR_NAME }}.azurecr.io/astro-agent:${{ steps.get-tag.outputs.tag }} \
+            -c "pip show apache-airflow-providers-git"
 
   deploy-server:
     runs-on: ubuntu-latest
@@ -124,3 +132,16 @@ jobs:
           kubectl logs -n ${{ vars.K8S_NAMESPACE }} deployment/astro-agent-sentinel --tail=50 \
             | grep "Heartbeat sent successfully" \
             || (echo "::error::No successful heartbeat found after deploy" && exit 1)
+
+      - name: Confirm DAG bundle cloned (GitDagBundle)
+        run: |
+          # Give the DAG processor time to attempt its first Git clone/refresh
+          sleep 30
+          LOGS=$(kubectl logs -n ${{ vars.K8S_NAMESPACE }} deployment/astro-agent-dag-processor --tail=300)
+          echo "$LOGS" | tail -n 50
+          # Fail on common Git/bundle failure signatures.
+          # Tune this pattern after reviewing a healthy startup log to avoid false positives.
+          if echo "$LOGS" | grep -iE "could not read from remote|authentication failed|permission denied \(publickey\)|repository not found|GitDagBundle.*(error|failed)|bundle.*(error|failed)"; then
+            echo "::error::DAG processor reports Git bundle errors. Check the git connection in Key Vault and repo access."
+            exit 1
+          fi

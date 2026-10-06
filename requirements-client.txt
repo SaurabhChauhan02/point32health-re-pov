@@ -6,3 +6,4 @@ apache-airflow-providers-sftp
 apache-airflow-providers-oracle
 apache-airflow-providers-ssh
 pandas
+apache-airflow-providers-git

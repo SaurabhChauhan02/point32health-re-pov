@@ -115,7 +115,19 @@ stateStoreBackend: airflow.providers.common.io.state_store.backend.StateStoreObj
 # The configuration is set as AIRFLOW__DAG_PROCESSOR__DAG_BUNDLE_CONFIG_LIST environment variable on the Agent containers
 # This is a list of JSON objects, each object is a DAG Bundle configuration
 # Example: '[{"name": "dags-folder", "classpath": "airflow.providers.git.bundles.git.GitDagBundle", "kwargs": {"repo_url": "github.com/apache/airflow", "tracking_ref": "main", "subdir": "airflow-core/src/airflow/example_dags"}}]'
-dagBundleConfigList: '[{"name": "dags-folder", "classpath": "airflow.dag_processing.bundles.local.LocalDagBundle", "kwargs": {}}]'
+dagBundleConfigList: '[
+  {
+    "name": "dags-folder",
+    "classpath": "airflow.providers.git.bundles.git.GitDagBundle",
+    "kwargs": {
+      "repo_url": "https://github.com/vanshtuli-lang/point32health-re-pov.git",
+      "tracking_ref": "main",
+      "subdir": "dags",
+      "refresh_interval": 120,
+      "git_conn_id": "github-dags-conn"
+    }
+  }
+]'
 
 # This is a list of environment variables that will be set on all the Agent components containers, i.e. Workers, DAG Processor, and Triggerer
 # This is useful to set common environment variables such as the Airflow Secret Backend or XCOM Backend configuration

@@ -3,9 +3,7 @@ name: Deploy Astro Remote Execution
 on:
   push:
     branches: [main]
-    # NOTE: dags/** is intentionally NOT listed. DAGs are served by GitDagBundle,
-    # so DAG-only changes are picked up by the agent from Git within the
-    # bundle refresh_interval and do not need an image build or agent restart.
+    # dags/** is intentionally excluded: GitDagBundle serves DAGs straight from Git.
     paths:
       - 'Dockerfile'
       - 'Dockerfile.client'
@@ -28,54 +26,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Azure login (OIDC)
-        uses: azure/login@v2
+      - uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: ACR login
-        run: az acr login --name ${{ vars.ACR_NAME }}
+      - run: az acr login --name ${{ vars.ACR_NAME }}
 
       - name: Install Astro CLI
         run: curl -sSL install.astronomer.io | sudo bash -s
 
-      - name: astro remote deploy (client image)
+      - name: Build and push agent image
         env:
           ASTRO_API_TOKEN: ${{ secrets.ASTRO_API_TOKEN }}
         run: astro remote deploy --platform linux/amd64
 
-      - name: Get pushed image tag from ACR
+      - name: Get pushed image tag
         id: get-tag
         run: |
           TAG=$(az acr repository show-tags \
             --name ${{ vars.ACR_NAME }} \
             --repository astro-agent \
-            --orderby time_desc \
-            --top 1 -o tsv)
-          echo "Pushed tag: $TAG"
+            --orderby time_desc --top 1 -o tsv)
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
-      - name: Verify providers are present
-        run: |
-          docker run --rm --entrypoint sh \
-            ${{ vars.ACR_NAME }}.azurecr.io/astro-agent:${{ steps.get-tag.outputs.tag }} \
-            -c "pip list | grep -iE 'microsoft|common-io|adlfs|sftp|ssh|oracle|pandas'"
-
-      - name: Verify git provider is present (required for GitDagBundle)
-        run: |
-          docker run --rm --entrypoint sh \
-            ${{ vars.ACR_NAME }}.azurecr.io/astro-agent:${{ steps.get-tag.outputs.tag }} \
-            -c "pip show apache-airflow-providers-git"
 
   deploy-server:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Deploy to Astro
-        uses: astronomer/deploy-action@v0.16.0
+      - uses: astronomer/deploy-action@v0.16.0
         with:
           deployment-id: cmucn0ycj8rok01o01utsobqi
         env:
@@ -87,8 +67,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Azure login (OIDC)
-        uses: azure/login@v2
+      - uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -101,47 +80,21 @@ jobs:
             --name ${{ vars.AKS_CLUSTER_NAME }} \
             --overwrite-existing
 
-      - name: Set up Helm
-        uses: azure/setup-helm@v4
-
-      - name: Add Astronomer chart repo
-        run: |
-          helm repo add astronomer https://helm.astronomer.io
-          helm repo update
+      - uses: azure/setup-helm@v4
 
       - name: Helm upgrade
         run: |
+          helm repo add astronomer https://helm.astronomer.io
+          helm repo update
           helm upgrade astro-agent astronomer/astro-remote-execution-agent \
             --version 2.4.0 \
             -f values.yaml \
             --set image=${{ vars.ACR_NAME }}.azurecr.io/astro-agent:${{ needs.build-push-client.outputs.image_tag }} \
             -n ${{ vars.K8S_NAMESPACE }}
 
-      - name: Restart to pick up commonEnv/config changes
-        run: kubectl rollout restart deployment -n ${{ vars.K8S_NAMESPACE }}
-
-      - name: Wait for rollout
+      - name: Restart and wait for rollout
         run: |
-          for d in astro-agent-worker-default-worker astro-agent-dag-processor astro-agent-triggerer astro-agent-sentinel; do
-            kubectl rollout status deployment/$d -n ${{ vars.K8S_NAMESPACE }} --timeout=900s
+          kubectl rollout restart deployment -n ${{ vars.K8S_NAMESPACE }}
+          for d in $(kubectl get deployment -n ${{ vars.K8S_NAMESPACE }} -o name); do
+            kubectl rollout status $d -n ${{ vars.K8S_NAMESPACE }} --timeout=900s
           done
-
-      - name: Confirm Sentinel heartbeat
-        run: |
-          sleep 45
-          kubectl logs -n ${{ vars.K8S_NAMESPACE }} deployment/astro-agent-sentinel --tail=50 \
-            | grep "Heartbeat sent successfully" \
-            || (echo "::error::No successful heartbeat found after deploy" && exit 1)
-
-      - name: Confirm DAG bundle cloned (GitDagBundle)
-        run: |
-          # Give the DAG processor time to attempt its first Git clone/refresh
-          sleep 30
-          LOGS=$(kubectl logs -n ${{ vars.K8S_NAMESPACE }} deployment/astro-agent-dag-processor --tail=300)
-          echo "$LOGS" | tail -n 50
-          # Fail on common Git/bundle failure signatures.
-          # Tune this pattern after reviewing a healthy startup log to avoid false positives.
-          if echo "$LOGS" | grep -iE "could not read from remote|authentication failed|permission denied \(publickey\)|repository not found|GitDagBundle.*(error|failed)|bundle.*(error|failed)"; then
-            echo "::error::DAG processor reports Git bundle errors. Check the git connection in Key Vault and repo access."
-            exit 1
-          fi

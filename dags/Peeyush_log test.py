@@ -10,7 +10,7 @@ DEMO_DIR = "/tmp/airflow-member-demo/{{ run_id | replace(':', '-') | replace('+'
 
 @dag(
     dag_id="member_load_ssh_demo",
-    description="Test trigger for log retrival ",
+    description="Test trigger for log retrieval",
     start_date=pendulum.datetime(2018, 4, 24, tz="America/New_York"),
     schedule="0 7 * * 1-5",
     catchup=False,
@@ -33,26 +33,39 @@ def member_load_ssh_demo():
         command="hostname && whoami && date",
     )
 
-    # Create a separate workspace for this run before releasing the load tasks. This
-    # represents the process-control initialization and gives every run its own evidence.
+    # Create a separate workspace for this run before releasing the load tasks.
     initialize = SSHOperator(
         task_id="initialize_member_load",
         ssh_conn_id=SSH_CONN_ID,
         command=f"mkdir -p {DEMO_DIR} && echo initialized > {DEMO_DIR}/status.txt",
     )
 
-    # Represent the member-history load with a remote command. The marker file provides
-    # a simple result that can be inspected directly on the VM after the demo.
+    # Parallel loads. Each writes a marker file that can be inspected on the VM.
     load_member_history = SSHOperator(
         task_id="load_member_history",
         ssh_conn_id=SSH_CONN_ID,
         command=f"echo member_history_complete > {DEMO_DIR}/member_history.txt",
     )
 
-    
+    load_member_cross_reference = SSHOperator(
+        task_id="load_member_cross_reference",
+        ssh_conn_id=SSH_CONN_ID,
+        command=f"echo member_cross_reference_complete > {DEMO_DIR}/member_cross_reference.txt",
+    )
 
-    # The sequence mirrors the scheduler requirement: connectivity first, initialization
-    # second, parallel member loads third, and a single completion point at the end.
+    load_member_risk = SSHOperator(
+        task_id="load_member_risk",
+        ssh_conn_id=SSH_CONN_ID,
+        command=f"echo member_risk_complete > {DEMO_DIR}/member_risk.txt",
+    )
+
+    # Single completion point after all parallel loads finish.
+    complete = SSHOperator(
+        task_id="complete",
+        ssh_conn_id=SSH_CONN_ID,
+        command=f"echo complete > {DEMO_DIR}/complete.txt",
+    )
+
     verify_vm >> initialize >> [
         load_member_history,
         load_member_cross_reference,

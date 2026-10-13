@@ -18,7 +18,7 @@ import zipfile
 from datetime import datetime
 
 from airflow.providers.sftp.hooks.sftp import SFTPHook
-from airflow.sdk import dag, task
+from airflow.sdk import Param, dag, task
 
 SFTP_CONN_ID = "sftp_claims"
 CLAIMS_FILE = "claims_data_6k.csv"
@@ -40,6 +40,13 @@ DEMO_USER = "claims_ops_user"
     catchup=False,
     tags=["demo", "claims", "sftp"],
     doc_md=__doc__,
+    params={
+        "zip_archive": Param(
+            True,
+            type="boolean",
+            description="Zip the archived copy. If false, the archived CSV is left unzipped.",
+        ),
+    },
 )
 def claims_sftp_archive():
     @task
@@ -67,7 +74,11 @@ def claims_sftp_archive():
         print(f"Moved {COPY_1} -> {ARCHIVED_FILE}")
 
     @task
-    def zip_archived_file():
+    def zip_archived_file(**context):
+        if not context["params"]["zip_archive"]:
+            print(f"zip_archive is false; leaving {ARCHIVED_FILE} unzipped")
+            return
+
         with SFTPHook(ssh_conn_id=SFTP_CONN_ID).get_conn() as sftp:
             with sftp.open(ARCHIVED_FILE, "rb") as f:
                 data = f.read()

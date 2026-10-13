@@ -2,15 +2,16 @@
 
 Uses the same SFTP server and file as `claims_sftp_to_oracle_parallel`:
 
-1. Make two copies of the claims file next to the original.
+1. Make two copies of the claims file next to the original (first restoring
+   the original from copy 2 if a previous run deleted it).
 2. Move copy 1 to the `archive` folder.
 3. Zip the archived copy.
 4. Grant the user delete access (demo: log only).
 5. Delete the original file.
 6. Revoke the user's delete access (demo: log only).
 
-Copy 2 stays in the original location as a backup. Re-upload the original
-file before re-running this DAG or the claims load DAGs.
+Copy 2 stays in the original location as a backup. The next run renames it
+back to the original name, so the DAG can be re-run without re-uploading.
 """
 
 import io
@@ -52,6 +53,11 @@ def claims_sftp_archive():
     @task
     def make_copies():
         with SFTPHook(ssh_conn_id=SFTP_CONN_ID).get_conn() as sftp:
+            # A previous run deleted the original; bring back its backup (copy 2).
+            if CLAIMS_FILE not in sftp.listdir():
+                sftp.rename(COPY_2, CLAIMS_FILE)
+                print(f"Restored {CLAIMS_FILE} from {COPY_2}")
+
             with sftp.open(CLAIMS_FILE, "rb") as f:
                 data = f.read()
             for copy in (COPY_1, COPY_2):
